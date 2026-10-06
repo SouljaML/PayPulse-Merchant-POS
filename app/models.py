@@ -333,6 +333,11 @@ class Transaction(Base):
 
     events: Mapped[list["TransactionEvent"]] = relationship(back_populates="transaction")
     receipt: Mapped["Receipt | None"] = relationship(back_populates="transaction", uselist=False)
+    shop: Mapped["Shop | None"] = relationship(lazy="joined", viewonly=True)
+
+    @property
+    def shop_name(self) -> str | None:
+        return self.shop.name if self.shop else None
 
 
 class TransactionEvent(Base):

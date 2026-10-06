@@ -36,6 +36,7 @@ class TransactionOut(BaseModel):
     id: uuid.UUID
     merchant_id: uuid.UUID
     shop_id: uuid.UUID | None
+    shop_name: str | None = None
     provider_id: uuid.UUID
     type: TransactionType
     status: TransactionStatus
