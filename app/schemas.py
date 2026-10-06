@@ -2,7 +2,7 @@ import uuid
 from datetime import datetime
 from decimal import Decimal
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 from app.models import CommissionType, KycDocStatus, MerchantStatus, TransactionStatus, TransactionType, ProviderStatus
 
@@ -175,6 +175,77 @@ class CommissionRateCreate(BaseModel):
         return v
 
 
+class CommissionTierIn(BaseModel):
+    """One band. commission = provider_fee * percentage + flat_fee, where
+    provider_fee is what the provider charges for amounts in this band and
+    percentage is PayPulse's share of that fee (0.20 = 20%)."""
+
+    min_amount: Decimal
+    max_amount: Decimal | None = None  # None = no upper limit
+    provider_fee: Decimal = Decimal("0")
+    percentage: Decimal = Decimal("0")
+    flat_fee: Decimal = Decimal("0")
+
+    @field_validator("percentage")
+    @classmethod
+    def tier_percentage_in_range(cls, v: Decimal) -> Decimal:
+        if not (0 <= v <= 1):
+            raise ValueError("percentage must be between 0 and 1 (0.20 = 20% of the provider's fee), not a 0-100 value")
+        return v
+
+    @field_validator("min_amount", "max_amount", "provider_fee", "flat_fee")
+    @classmethod
+    def not_negative(cls, v: Decimal | None) -> Decimal | None:
+        if v is not None and v < 0:
+            raise ValueError("amounts cannot be negative")
+        return v
+
+
+class CommissionTiersSet(BaseModel):
+    """The full replacement set of bands for a provider. A band covers
+    min_amount through max_amount, BOTH inclusive (amounts have two decimals,
+    so a schedule written "1-100, 100.01-500" has no hole between its bands).
+    Rules: bands can't overlap (a band's min must be above the previous band's
+    max); only the highest band may have no upper limit; max can't be below
+    min. Gaps are allowed — an amount in a gap simply earns no commission,
+    the same as an amount above a capped top band."""
+
+    tiers: list[CommissionTierIn]
+
+    @model_validator(mode="after")
+    def bands_are_valid(self) -> "CommissionTiersSet":
+        tiers = sorted(self.tiers, key=lambda t: t.min_amount)
+        if not tiers:
+            raise ValueError("at least one band is required")
+        for i, t in enumerate(tiers):
+            last = i == len(tiers) - 1
+            if t.max_amount is not None and t.max_amount < t.min_amount:
+                raise ValueError(f"band starting at {t.min_amount}: max amount can't be below min amount")
+            if last:
+                continue
+            nxt = tiers[i + 1]
+            if t.max_amount is None:
+                raise ValueError("only the highest band can have no max amount")
+            if nxt.min_amount <= t.max_amount:
+                raise ValueError(
+                    f"bands overlap: the band {t.min_amount} to {t.max_amount} runs into the band starting at "
+                    f"{nxt.min_amount}"
+                )
+        self.tiers = tiers
+        return self
+
+
+class CommissionTierOut(BaseModel):
+    id: uuid.UUID
+    min_amount: Decimal
+    max_amount: Decimal | None
+    provider_fee: Decimal
+    percentage: Decimal
+    flat_fee: Decimal
+
+    model_config = {"from_attributes": True}
+
+
 class CommissionRateOut(BaseModel):
     id: uuid.UUID
     provider_id: uuid.UUID
@@ -184,8 +255,19 @@ class CommissionRateOut(BaseModel):
     effective_from: datetime
     effective_to: datetime | None
     set_by: uuid.UUID
+    # Empty = plain single rate; otherwise the bands decide and the three
+    # fields above are ignored.
+    tiers: list[CommissionTierOut] = []
 
     model_config = {"from_attributes": True}
+
+
+class CommissionPreviewOut(BaseModel):
+    provider_id: uuid.UUID
+    amount: Decimal
+    commission: Decimal | None  # None = no rate / amount outside every band: nothing would be recorded
+    provider_fee: Decimal | None = None  # the band's provider fee; None for a plain (untiered) rate
+    rate_id: uuid.UUID | None
 
 
 class CommissionSummaryOut(BaseModel):

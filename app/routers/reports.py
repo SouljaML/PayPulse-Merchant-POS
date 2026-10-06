@@ -158,6 +158,8 @@ def _local_day(ts: datetime, tz: tzinfo) -> date:
 
 
 def _rate_label(rate: ProviderCommissionRate) -> str:
+    if rate.tiers:
+        return f"Tiered ({len(rate.tiers)} bands)"
     pct = f"{(rate.percentage * 100).quantize(Decimal('0.01'))}%"
     flat = f"{CURRENCY} {rate.flat_fee.quantize(Decimal('0.01'))}"
     if rate.commission_type == CommissionType.PERCENTAGE:

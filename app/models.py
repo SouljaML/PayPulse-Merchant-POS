@@ -14,6 +14,7 @@ from sqlalchemy import (
     false,
     func,
 )
+from sqlalchemy import inspect as sa_inspect
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -284,6 +285,49 @@ class ProviderCommissionRate(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
     provider: Mapped["Provider"] = relationship()
+    # Amount bands. Empty = this version is a plain single rate (the three
+    # columns above apply to every amount). Non-empty = the tiers decide, and
+    # the header columns are ignored. selectin so it's loaded with the rate
+    # in async code (a lazy load on access would raise MissingGreenlet).
+    tiers: Mapped[list["ProviderCommissionTier"]] = relationship(
+        lazy="selectin",
+        order_by="ProviderCommissionTier.min_amount",
+        cascade="all, delete-orphan",
+    )
+
+
+class ProviderCommissionTier(Base):
+    """One amount band within a commission rate version, modelled on how
+    providers publish fees: for transactions from min_amount through
+    max_amount (both inclusive; max NULL = no upper limit) the PROVIDER
+    charges provider_fee, and PayPulse earns
+
+        commission = provider_fee * percentage + flat_fee
+
+    i.e. `percentage` is PayPulse's share of the provider's fee (a fraction:
+    0.20 = 20% of the fee) and flat_fee an optional fixed amount on top. Either
+    can be zero. Bands may leave gaps (an amount in a gap earns nothing) but
+    never overlap. Like the rate itself, a tier is never edited in place —
+    changing fees or ranges creates a new rate version with a fresh set of
+    tiers, so Transaction.commission_rate_id / CommissionEntry.commission_rate_id
+    always pin the exact bands in force when a transaction confirmed (the
+    amount then identifies the band, so no separate tier id is snapshotted).
+
+    commission_type is a leftover from the first design of this table: it's
+    NOT NULL in databases that already have it, so it's still written
+    (always PERCENTAGE_PLUS_FLAT) but nothing reads it."""
+
+    __tablename__ = "provider_commission_tiers"
+    __table_args__ = (UniqueConstraint("rate_id", "min_amount"),)
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=_uuid)
+    rate_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("provider_commission_rates.id"))
+    min_amount: Mapped[Decimal] = mapped_column(Numeric(14, 2))
+    max_amount: Mapped[Decimal | None] = mapped_column(Numeric(14, 2), nullable=True)
+    provider_fee: Mapped[Decimal] = mapped_column(Numeric(14, 2), default=0, server_default="0")
+    commission_type: Mapped[CommissionType] = mapped_column(Enum(CommissionType, name="commission_type"))
+    percentage: Mapped[Decimal] = mapped_column(Numeric(6, 4), default=0)
+    flat_fee: Mapped[Decimal] = mapped_column(Numeric(14, 2), default=0)
 
 
 # --------------------------------------------------------------------------
@@ -337,6 +381,14 @@ class Transaction(Base):
 
     @property
     def shop_name(self) -> str | None:
+        # Never trigger a lazy load: in async code that raises MissingGreenlet,
+        # which is what broke transaction initiation when this first shipped (a
+        # transaction created in the current request has no shop loaded yet).
+        # Anything that read the row back from the database has it loaded via
+        # lazy="joined"; code that builds a new Transaction should
+        # `await db.refresh(txn, ["shop"])` before returning it.
+        if "shop" in sa_inspect(self).unloaded:
+            return None
         return self.shop.name if self.shop else None
 
 

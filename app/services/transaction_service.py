@@ -87,7 +87,9 @@ async def _apply_commission(db: AsyncSession, txn: Transaction) -> None:
     rate = await commission_service.get_current_rate(db, txn.provider_id)
     if rate is None:
         return
-    amount = commission_service.calculate_commission(rate, txn.amount)
+    amount = commission_service.commission_for(rate, txn.amount)
+    if amount is None:  # tiered rate with no band covering this amount
+        return
     await commission_service.record_commission_entry(
         db,
         transaction_id=txn.id,
@@ -181,6 +183,10 @@ async def initiate_transaction(
         if existing:
             return existing
         raise DuplicateTransactionError(idempotency_key)
+
+    # A just-created row has no relationships loaded; the response includes
+    # shop_name, so load it now (see Transaction.shop_name).
+    await db.refresh(txn, attribute_names=["shop"])
 
     await _record_event(db, txn, TransactionStatus.INITIATED, actor=str(initiated_by))
 

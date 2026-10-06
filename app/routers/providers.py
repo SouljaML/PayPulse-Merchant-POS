@@ -1,6 +1,7 @@
 import uuid
+from decimal import Decimal
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -10,9 +11,11 @@ from app.dependencies import CurrentUser, require_roles
 from app.models import CommissionEntry, Provider, ProviderCommissionRate, ProviderStatus
 from app.schemas import (
     CommissionEntryOut,
+    CommissionPreviewOut,
     CommissionRateCreate,
     CommissionRateOut,
     CommissionSummaryOut,
+    CommissionTiersSet,
     ProviderCreate,
     ProviderOut,
 )
@@ -199,6 +202,78 @@ async def set_commission_rate(
     await db.commit()
     await db.refresh(new_rate)
     return new_rate
+
+
+@router.put("/{provider_id}/commission-tiers", response_model=CommissionRateOut, status_code=201)
+async def set_commission_tiers(
+    provider_id: uuid.UUID,
+    body: CommissionTiersSet,
+    user: CurrentUser = Depends(require_roles("platform_admin")),
+    db: AsyncSession = Depends(get_db),
+):
+    """Replaces the provider's fee schedule with this full set of amount
+    bands, effective immediately. Same rules as a plain rate change: the
+    current version is closed out, never edited, and already-confirmed
+    transactions keep the commission they snapshotted. Band validation
+    (no overlaps, max not below min, only the top band open-ended) happens
+    in CommissionTiersSet and comes back as a 422 naming the problem."""
+    provider = await db.get(Provider, provider_id)
+    if provider is None:
+        raise HTTPException(status_code=404, detail="Provider not found")
+
+    new_rate = await commission_service.set_commission_tiers(
+        db, provider_id=provider_id, tiers=body.tiers, set_by=user.id
+    )
+
+    await audit_service.record(
+        db,
+        actor_user_id=user.id,
+        action="commission_tiers.set",
+        target_type="provider",
+        target_id=str(provider_id),
+        details={
+            "tiers": [
+                {
+                    "min_amount": str(t.min_amount),
+                    "max_amount": str(t.max_amount) if t.max_amount is not None else None,
+                    "provider_fee": str(t.provider_fee),
+                    "percentage": str(t.percentage),
+                    "flat_fee": str(t.flat_fee),
+                }
+                for t in body.tiers
+            ]
+        },
+    )
+
+    await db.commit()
+    await db.refresh(new_rate)
+    return new_rate
+
+
+@router.get("/{provider_id}/commission-preview", response_model=CommissionPreviewOut)
+async def preview_commission(
+    provider_id: uuid.UUID,
+    amount: Decimal = Query(..., gt=0),
+    user: CurrentUser = Depends(require_roles("platform_admin")),
+    db: AsyncSession = Depends(get_db),
+):
+    """What commission the CURRENT rate would record for this amount — the
+    same code path a confirmation uses. For checking a fee schedule was
+    entered correctly, e.g. against a provider's worked examples, without
+    having to run a real transaction."""
+    provider = await db.get(Provider, provider_id)
+    if provider is None:
+        raise HTTPException(status_code=404, detail="Provider not found")
+    rate = await commission_service.get_current_rate(db, provider_id)
+    commission = commission_service.commission_for(rate, amount) if rate is not None else None
+    tier = commission_service.find_tier(rate.tiers, amount) if rate is not None and rate.tiers else None
+    return CommissionPreviewOut(
+        provider_id=provider_id,
+        amount=amount,
+        commission=commission,
+        provider_fee=tier.provider_fee if tier is not None else None,
+        rate_id=rate.id if rate else None,
+    )
 
 
 @router.get("/{provider_id}/commissions/summary", response_model=CommissionSummaryOut)
