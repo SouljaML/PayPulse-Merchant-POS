@@ -75,12 +75,15 @@ class WithdrawalCreate(BaseModel):
 class BalanceOut(BaseModel):
     provider_adapter_key: str
     account_identifier: str
-    balance: Decimal
-    as_of: datetime
+    # None when the provider has no balance lookup (C-Pay) or it failed.
+    balance: Decimal | None = None
+    as_of: datetime | None = None
 
 
 class ProviderAccountOut(BaseModel):
     id: uuid.UUID
+    # None = available to every shop of the merchant (the normal case).
+    shop_id: uuid.UUID | None = None
     provider_adapter_key: str
     provider_name: str
     account_identifier: str
@@ -389,6 +392,10 @@ class ShopStatusUpdate(BaseModel):
 class ProviderAccountCreate(BaseModel):
     provider_adapter_key: str
     account_identifier: str
+
+
+class ProviderAccountActive(BaseModel):
+    is_active: bool
 
 
 # ---- Tills (physical checkout terminals — the fraud-control unit) ----

@@ -4,7 +4,7 @@ from pathlib import Path
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
 from fastapi.responses import FileResponse
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.adapters.registry import get_adapter
@@ -29,6 +29,8 @@ from app.schemas import (
     MerchantCreate,
     MerchantOut,
     MerchantStatusUpdate,
+    ProviderAccountActive,
+    ProviderAccountCreate,
     ProviderAccountOut,
 )
 from app.services import audit_service
@@ -362,16 +364,24 @@ async def list_provider_accounts(
         raise HTTPException(status_code=403, detail="Not authorized for this merchant")
 
     query = select(MerchantProviderAccount).where(MerchantProviderAccount.merchant_id == merchant_id)
-    if user.role == "teller" and user.shop_id is not None:
-        query = query.where(MerchantProviderAccount.shop_id == user.shop_id)
+    if user.role == "teller":
+        # Accounts are set up once per merchant and work in every shop; a
+        # teller sees those plus anything pinned to their own shop, and never
+        # a switched-off account they couldn't use anyway.
+        query = query.where(MerchantProviderAccount.is_active.is_(True))
+        if user.shop_id is not None:
+            query = query.where(
+                or_(MerchantProviderAccount.shop_id.is_(None), MerchantProviderAccount.shop_id == user.shop_id)
+            )
 
-    accounts = await db.scalars(query)
+    accounts = await db.scalars(query.order_by(MerchantProviderAccount.id))
     results = []
     for account in accounts:
         provider = await db.get(Provider, account.provider_id)
         results.append(
             ProviderAccountOut(
                 id=account.id,
+                shop_id=account.shop_id,
                 provider_adapter_key=provider.adapter_key,
                 provider_name=provider.name,
                 account_identifier=account.account_identifier,
@@ -383,6 +393,99 @@ async def list_provider_accounts(
     return results
 
 
+def _account_out(account: MerchantProviderAccount, provider: Provider) -> ProviderAccountOut:
+    return ProviderAccountOut(
+        id=account.id,
+        shop_id=account.shop_id,
+        provider_adapter_key=provider.adapter_key,
+        provider_name=provider.name,
+        account_identifier=account.account_identifier,
+        is_active=account.is_active,
+        cached_balance=account.cached_balance,
+        balance_updated_at=account.balance_updated_at,
+    )
+
+
+@router.post("/{merchant_id}/provider-accounts", response_model=ProviderAccountOut, status_code=201)
+async def create_provider_account(
+    merchant_id: uuid.UUID,
+    body: ProviderAccountCreate,
+    user: CurrentUser = Depends(require_roles("platform_admin")),
+    db: AsyncSession = Depends(get_db),
+):
+    """Switch a provider on for a merchant. Done once, by PayPulse: from then
+    on every shop and every registered device of the merchant can use it —
+    merchants don't add or remove providers themselves."""
+    merchant = await db.get(Merchant, merchant_id)
+    if merchant is None:
+        raise HTTPException(status_code=404, detail="Merchant not found")
+
+    provider = await db.scalar(select(Provider).where(Provider.adapter_key == body.provider_adapter_key))
+    if provider is None:
+        raise HTTPException(status_code=400, detail=f"Unknown provider adapter_key '{body.provider_adapter_key}'")
+
+    identifier = body.account_identifier.strip()
+    if not identifier:
+        raise HTTPException(status_code=400, detail="account_identifier is required")
+
+    existing = await db.scalar(
+        select(MerchantProviderAccount).where(
+            MerchantProviderAccount.merchant_id == merchant_id,
+            MerchantProviderAccount.provider_id == provider.id,
+            MerchantProviderAccount.account_identifier == identifier,
+        )
+    )
+    if existing is not None:
+        raise HTTPException(status_code=409, detail="This account is already registered for this provider")
+
+    account = MerchantProviderAccount(
+        merchant_id=merchant_id, shop_id=None, provider_id=provider.id, account_identifier=identifier
+    )
+    db.add(account)
+    await db.flush()
+    await audit_service.record(
+        db,
+        actor_user_id=user.id,
+        action="provider_account.created",
+        target_type="merchant_provider_account",
+        target_id=str(account.id),
+        details={"merchant_id": str(merchant_id), "provider": provider.name, "account_identifier": identifier},
+    )
+    await db.commit()
+    await db.refresh(account)
+    return _account_out(account, provider)
+
+
+@router.patch("/{merchant_id}/provider-accounts/{account_id}", response_model=ProviderAccountOut)
+async def set_provider_account_active(
+    merchant_id: uuid.UUID,
+    account_id: uuid.UUID,
+    body: ProviderAccountActive,
+    user: CurrentUser = Depends(require_roles("platform_admin")),
+    db: AsyncSession = Depends(get_db),
+):
+    """Switch a provider off (or back on) for a merchant. It is never deleted:
+    past transactions point at it. Off means no device can start a payment
+    with it and tellers no longer see it."""
+    account = await db.get(MerchantProviderAccount, account_id)
+    if account is None or account.merchant_id != merchant_id:
+        raise HTTPException(status_code=404, detail="Provider account not found")
+    provider = await db.get(Provider, account.provider_id)
+
+    previous = account.is_active
+    account.is_active = body.is_active
+    await audit_service.record(
+        db,
+        actor_user_id=user.id,
+        action="provider_account.enabled" if body.is_active else "provider_account.disabled",
+        target_type="merchant_provider_account",
+        target_id=str(account.id),
+        details={"provider": provider.name, "from": previous, "to": body.is_active},
+    )
+    await db.commit()
+    return _account_out(account, provider)
+
+
 @router.get("/{merchant_id}/balances", response_model=list[BalanceOut])
 async def get_balances(
     merchant_id: uuid.UUID,
@@ -392,16 +495,33 @@ async def get_balances(
     if user.role != "platform_admin" and user.merchant_id != merchant_id:
         raise HTTPException(status_code=403, detail="Not authorized for this merchant")
 
-    query = select(MerchantProviderAccount).where(MerchantProviderAccount.merchant_id == merchant_id)
+    query = select(MerchantProviderAccount).where(
+        MerchantProviderAccount.merchant_id == merchant_id, MerchantProviderAccount.is_active.is_(True)
+    )
     if user.role == "teller" and user.shop_id is not None:
-        query = query.where(MerchantProviderAccount.shop_id == user.shop_id)
+        query = query.where(
+            or_(MerchantProviderAccount.shop_id.is_(None), MerchantProviderAccount.shop_id == user.shop_id)
+        )
 
     accounts = await db.scalars(query)
     results = []
     for account in accounts:
         provider = await db.get(Provider, account.provider_id)
         adapter = get_adapter(provider.adapter_key)
-        balance = await adapter.get_balance(account.account_identifier)
+        # One provider that can't report a balance (C-Pay has no balance
+        # lookup) or is briefly down must not take the whole page with it.
+        try:
+            balance = await adapter.get_balance(account.account_identifier)
+        except Exception:
+            results.append(
+                BalanceOut(
+                    provider_adapter_key=provider.adapter_key,
+                    account_identifier=account.account_identifier,
+                    balance=None,
+                    as_of=None,
+                )
+            )
+            continue
         # Refresh the cache while we're here so the dashboard has a fast path next time.
         account.cached_balance = balance.amount
         account.balance_updated_at = balance.as_of

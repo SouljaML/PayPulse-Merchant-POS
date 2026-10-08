@@ -1,13 +1,13 @@
 import uuid
 
 from fastapi import APIRouter, Depends, HTTPException
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db
 from app.dependencies import CurrentUser, get_current_user, require_merchant_manager
 from app.models import Merchant, MerchantProviderAccount, Provider, Shop, ShopStatus
-from app.schemas import ProviderAccountCreate, ProviderAccountOut, ShopCreate, ShopOut, ShopStatusUpdate
+from app.schemas import ProviderAccountOut, ShopCreate, ShopOut, ShopStatusUpdate
 from app.services import audit_service
 
 router = APIRouter(prefix="/merchants/{merchant_id}/shops", tags=["shops"])
@@ -105,13 +105,21 @@ async def list_shop_provider_accounts(
     if shop is None or shop.merchant_id != merchant_id:
         raise HTTPException(status_code=404, detail="Shop not found")
 
-    accounts = await db.scalars(select(MerchantProviderAccount).where(MerchantProviderAccount.shop_id == shop_id))
+    # Providers are set up once for the whole merchant (shop_id empty) and work
+    # in every shop; an account pinned to this shop is also included.
+    accounts = await db.scalars(
+        select(MerchantProviderAccount).where(
+            MerchantProviderAccount.merchant_id == merchant_id,
+            or_(MerchantProviderAccount.shop_id.is_(None), MerchantProviderAccount.shop_id == shop_id),
+        )
+    )
     results = []
     for account in accounts:
         provider = await db.get(Provider, account.provider_id)
         results.append(
             ProviderAccountOut(
                 id=account.id,
+                shop_id=account.shop_id,
                 provider_adapter_key=provider.adapter_key,
                 provider_name=provider.name,
                 account_identifier=account.account_identifier,
@@ -121,65 +129,3 @@ async def list_shop_provider_accounts(
             )
         )
     return results
-
-
-@router.post("/{shop_id}/provider-accounts", response_model=ProviderAccountOut, status_code=201)
-async def create_shop_provider_account(
-    merchant_id: uuid.UUID,
-    shop_id: uuid.UUID,
-    body: ProviderAccountCreate,
-    user: CurrentUser = Depends(require_merchant_manager),
-    db: AsyncSession = Depends(get_db),
-):
-    """Registers a till (in the money sense — a provider account/agent
-    number) for this shop. This had no endpoint at all before — the only
-    provider account in the system so far was created directly by the seed
-    script, never through the API."""
-    shop = await db.get(Shop, shop_id)
-    if shop is None or shop.merchant_id != merchant_id:
-        raise HTTPException(status_code=404, detail="Shop not found")
-
-    provider = await db.scalar(select(Provider).where(Provider.adapter_key == body.provider_adapter_key))
-    if provider is None:
-        raise HTTPException(status_code=400, detail=f"Unknown provider adapter_key '{body.provider_adapter_key}'")
-
-    existing = await db.scalar(
-        select(MerchantProviderAccount).where(
-            MerchantProviderAccount.merchant_id == merchant_id,
-            MerchantProviderAccount.provider_id == provider.id,
-            MerchantProviderAccount.account_identifier == body.account_identifier,
-        )
-    )
-    if existing is not None:
-        raise HTTPException(status_code=409, detail="This account_identifier is already registered for this provider")
-
-    account = MerchantProviderAccount(
-        merchant_id=merchant_id,
-        shop_id=shop_id,
-        provider_id=provider.id,
-        account_identifier=body.account_identifier,
-    )
-    db.add(account)
-    await db.flush()
-
-    await audit_service.record(
-        db,
-        actor_user_id=user.id,
-        action="provider_account.created",
-        target_type="merchant_provider_account",
-        target_id=str(account.id),
-        details={"shop_id": str(shop_id), "provider": provider.name, "account_identifier": body.account_identifier},
-    )
-
-    await db.commit()
-    await db.refresh(account)
-
-    return ProviderAccountOut(
-        id=account.id,
-        provider_adapter_key=provider.adapter_key,
-        provider_name=provider.name,
-        account_identifier=account.account_identifier,
-        is_active=account.is_active,
-        cached_balance=account.cached_balance,
-        balance_updated_at=account.balance_updated_at,
-    )

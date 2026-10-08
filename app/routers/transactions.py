@@ -53,6 +53,7 @@ async def create_transaction(
             txn_type=body.type,
             idempotency_key=body.idempotency_key,
             device_id=device_ref,
+            shop_id=device.shop_id if device is not None else user.shop_id,
         )
     except transaction_service.ProviderUnavailableError as exc:
         raise HTTPException(status_code=503, detail=str(exc))
@@ -124,6 +125,7 @@ async def create_withdrawal(
             txn_type=TransactionType.WITHDRAWAL,
             idempotency_key=body.idempotency_key,
             device_id=await _device_reference(db, device, fallback=None),
+            shop_id=device.shop_id if device is not None else user.shop_id,
         )
     except transaction_service.ProviderUnavailableError as exc:
         raise HTTPException(status_code=503, detail=str(exc))

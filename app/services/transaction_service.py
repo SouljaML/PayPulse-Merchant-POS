@@ -113,6 +113,7 @@ async def initiate_transaction(
     txn_type: TransactionType,
     idempotency_key: str,
     device_id: str | None,
+    shop_id: uuid.UUID | None = None,
 ) -> Transaction:
     """Create the transaction row, then hand off to the provider adapter. Every
     step that changes status also writes a TransactionEvent, so the full history
@@ -142,8 +143,14 @@ async def initiate_transaction(
         raise MerchantNotActiveError("This merchant hasn't completed verification yet")
     if merchant.status != MerchantStatus.ACTIVE:
         raise MerchantNotActiveError("This merchant account is suspended. Contact PayPulse support")
-    if account.shop_id is not None:
-        shop = await db.get(Shop, account.shop_id)
+    # Which shop made the sale comes from the device / teller it was made on
+    # (provider accounts are merchant-wide), not from the account. An account
+    # pinned to one shop still can't be used from another.
+    if account.shop_id is not None and shop_id is not None and account.shop_id != shop_id:
+        raise ValueError("This provider account belongs to a different shop")
+    effective_shop_id = shop_id or account.shop_id
+    if effective_shop_id is not None:
+        shop = await db.get(Shop, effective_shop_id)
         if shop is not None and shop.status != ShopStatus.ACTIVE:
             raise MerchantNotActiveError("This shop is suspended. Contact your manager")
 
@@ -163,7 +170,7 @@ async def initiate_transaction(
 
     txn = Transaction(
         merchant_id=merchant_id,
-        shop_id=account.shop_id,
+        shop_id=effective_shop_id,
         provider_id=provider.id,
         merchant_provider_account_id=account.id,
         initiated_by=initiated_by,
