@@ -82,6 +82,12 @@ class TillStatus(str, enum.Enum):
     BLOCKED = "blocked"
 
 
+class DeviceStatus(str, enum.Enum):
+    PENDING = "pending"   # registered by the owner, not yet enrolled on a phone
+    ACTIVE = "active"     # enrolled; allowed onto the network
+    REVOKED = "revoked"   # shut out; needs a fresh enrollment code to come back
+
+
 class Merchant(Base):
     __tablename__ = "merchants"
 
@@ -142,6 +148,47 @@ class Till(Base):
     status: Mapped[TillStatus] = mapped_column(Enum(TillStatus, name="till_status"), default=TillStatus.ACTIVE)
     blocked_reason: Mapped[str | None] = mapped_column(String(300), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class Device(Base):
+    """A physical phone or POS terminal that is allowed onto the network.
+
+    The owner registers it in the portal (which creates this row as PENDING
+    and shows a one-time enrollment code). The app enrols with that code and
+    is handed a long random device token, stored on the device. Only the
+    SHA-256 of the code and of the token are kept here, so a database leak
+    doesn't hand anyone a working credential. Teller sessions and every
+    transaction call must carry the token of an ACTIVE device (see
+    dependencies.require_device); revoking the row cuts the device off on
+    its very next request."""
+
+    __tablename__ = "devices"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=_uuid)
+    merchant_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("merchants.id"), index=True)
+    shop_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("shops.id"))
+    till_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("tills.id"), nullable=True)
+    label: Mapped[str] = mapped_column(String(150))
+    status: Mapped[DeviceStatus] = mapped_column(Enum(DeviceStatus, name="device_status"), default=DeviceStatus.PENDING)
+
+    enrollment_code_hash: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    enrollment_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    token_hash: Mapped[str | None] = mapped_column(String(64), nullable=True, unique=True)
+    # Reserved for phase 2 (challenge signed by the Android Keystore key).
+    public_key: Mapped[str | None] = mapped_column(String(2000), nullable=True)
+
+    hardware_id: Mapped[str | None] = mapped_column(String(200), nullable=True, index=True)
+    platform: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    model: Mapped[str | None] = mapped_column(String(150), nullable=True)
+    os_version: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    app_version: Mapped[str | None] = mapped_column(String(50), nullable=True)
+
+    created_by: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id"), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    enrolled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_seen_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    revoked_reason: Mapped[str | None] = mapped_column(String(300), nullable=True)
 
 
 class MerchantKycDocument(Base):

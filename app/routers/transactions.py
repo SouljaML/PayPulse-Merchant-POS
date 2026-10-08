@@ -7,22 +7,39 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db
-from app.dependencies import CurrentUser, get_current_user, require_roles
-from app.models import CommissionEntry, Transaction, TransactionStatus, TransactionType
+from app.dependencies import CurrentUser, get_current_user, require_device, require_roles
+from app.models import CommissionEntry, Device, Till, Transaction, TransactionStatus, TransactionType
 from app.schemas import CommissionEntryOut, ReceiptOut, TransactionCreate, TransactionOut, WithdrawalCreate
 from app.services import transaction_service
 
 router = APIRouter(prefix="/transactions", tags=["transactions"])
 
 
+async def _device_reference(db: AsyncSession, device: Device | None, *, fallback: str | None) -> str | None:
+    if device is None:
+        return fallback
+    if device.till_id is not None:
+        till = await db.get(Till, device.till_id)
+        if till is not None:
+            return till.till_identifier
+    return str(device.id)
+
+
 @router.post("", response_model=TransactionOut, status_code=201)
 async def create_transaction(
     body: TransactionCreate,
     user: CurrentUser = Depends(get_current_user),
+    device: Device | None = Depends(require_device),
     db: AsyncSession = Depends(get_db),
 ):
     if user.merchant_id is None:
         raise HTTPException(status_code=403, detail="Only merchant users can initiate transactions")
+
+    # Which device made the sale comes from the credential, not from whatever
+    # the client says: a registered device's till identifier when it has one,
+    # otherwise its own id. (Falls back to the client's value only when device
+    # enforcement is off for local development.)
+    device_ref = await _device_reference(db, device, fallback=body.device_id)
 
     try:
         txn = await transaction_service.initiate_transaction(
@@ -35,7 +52,7 @@ async def create_transaction(
             amount=body.amount,
             txn_type=body.type,
             idempotency_key=body.idempotency_key,
-            device_id=body.device_id,
+            device_id=device_ref,
         )
     except transaction_service.ProviderUnavailableError as exc:
         raise HTTPException(status_code=503, detail=str(exc))
@@ -56,6 +73,7 @@ async def confirm_transaction_otp(
     transaction_id: uuid.UUID,
     body: OtpConfirmRequest,
     user: CurrentUser = Depends(get_current_user),
+    _device: Device | None = Depends(require_device),
     db: AsyncSession = Depends(get_db),
 ):
     """Second step for a provider adapter with requires_otp=True (currently
@@ -84,6 +102,7 @@ async def confirm_transaction_otp(
 async def create_withdrawal(
     body: WithdrawalCreate,
     user: CurrentUser = Depends(get_current_user),
+    device: Device | None = Depends(require_device),
     db: AsyncSession = Depends(get_db),
 ):
     if user.merchant_id is None:
@@ -104,7 +123,7 @@ async def create_withdrawal(
             amount=body.amount,
             txn_type=TransactionType.WITHDRAWAL,
             idempotency_key=body.idempotency_key,
-            device_id=None,
+            device_id=await _device_reference(db, device, fallback=None),
         )
     except transaction_service.ProviderUnavailableError as exc:
         raise HTTPException(status_code=503, detail=str(exc))
@@ -192,6 +211,7 @@ async def list_transactions(
 async def print_receipt(
     transaction_id: uuid.UUID,
     user: CurrentUser = Depends(get_current_user),
+    _device: Device | None = Depends(require_device),
     db: AsyncSession = Depends(get_db),
 ):
     txn = await db.get(Transaction, transaction_id)

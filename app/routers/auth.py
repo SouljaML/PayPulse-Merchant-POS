@@ -1,13 +1,14 @@
 import secrets
 
-from fastapi import APIRouter, Depends, HTTPException, Response
+from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from fastapi.security import OAuth2PasswordRequestForm
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.security import create_access_token, hash_password, verify_password
 from app.database import get_db
-from app.dependencies import CurrentUser, get_current_user
+from app.config import get_settings
+from app.dependencies import CurrentUser, check_device_scope, get_current_user, resolve_device
 from app.models import Role, User
 from app.schemas import ChangePasswordRequest, ResetPasswordOut, ResetPasswordRequest
 from app.services import audit_service
@@ -16,12 +17,24 @@ router = APIRouter(prefix="/auth", tags=["auth"])
 
 
 @router.post("/login")
-async def login(form: OAuth2PasswordRequestForm = Depends(), db: AsyncSession = Depends(get_db)):
+async def login(
+    request: Request, form: OAuth2PasswordRequestForm = Depends(), db: AsyncSession = Depends(get_db)
+):
     user = await db.scalar(select(User).where(User.email == form.username))
     if user is None or not user.is_active or not verify_password(form.password, user.hashed_password):
         raise HTTPException(status_code=401, detail="Incorrect email or password")
 
     role = await db.get(Role, user.role_id)
+
+    # Tellers can only sign in from a registered device. Checked after the
+    # password so the endpoint doesn't reveal which emails exist. Anyone else
+    # who presents a device token (an owner using the POS) has it validated
+    # too; owners and admins on the portal send none and are not affected.
+    if get_settings().require_registered_devices:
+        device = await resolve_device(request, db)
+        if role.name == "teller" or request.headers.get("x-device-token"):
+            check_device_scope(device, merchant_id=user.merchant_id, shop_id=user.shop_id)
+
     token = create_access_token(
         user_id=user.id,
         role=role.name,

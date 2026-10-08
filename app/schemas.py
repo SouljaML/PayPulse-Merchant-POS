@@ -463,3 +463,66 @@ class ResetPasswordOut(BaseModel):
     full_name: str
     role: str
     temporary_password: str
+
+
+# ---- Devices (registered phones / POS terminals) ----
+
+class DeviceCreate(BaseModel):
+    shop_id: uuid.UUID
+    till_id: uuid.UUID | None = None
+    label: str = Field(..., min_length=1, max_length=150)
+
+
+class DeviceRevoke(BaseModel):
+    reason: str = Field(..., min_length=1, max_length=300)
+
+
+class DeviceOut(BaseModel):
+    id: uuid.UUID
+    merchant_id: uuid.UUID
+    shop_id: uuid.UUID
+    shop_name: str | None = None
+    till_id: uuid.UUID | None = None
+    till_label: str | None = None
+    label: str
+    status: str
+    platform: str | None = None
+    model: str | None = None
+    os_version: str | None = None
+    app_version: str | None = None
+    created_at: datetime
+    enrolled_at: datetime | None = None
+    last_seen_at: datetime | None = None
+    revoked_at: datetime | None = None
+    revoked_reason: str | None = None
+    enrollment_expires_at: datetime | None = None
+
+    model_config = {"from_attributes": True}
+
+
+class DeviceWithCodeOut(DeviceOut):
+    """Returned once, when a device is registered or its code is reissued.
+    The code is not stored in readable form, so it can't be shown again."""
+
+    enrollment_code: str
+
+
+class DeviceEnrollRequest(BaseModel):
+    code: str = Field(..., min_length=4, max_length=32)
+    hardware_id: str | None = Field(None, max_length=200)
+    platform: str | None = Field(None, max_length=50)
+    model: str | None = Field(None, max_length=150)
+    os_version: str | None = Field(None, max_length=50)
+    app_version: str | None = Field(None, max_length=50)
+
+
+class DeviceEnrollOut(BaseModel):
+    device_id: uuid.UUID
+    device_token: str
+    label: str
+    merchant_id: uuid.UUID
+    shop_id: uuid.UUID
+    shop_name: str | None = None
+    till_id: uuid.UUID | None = None
+    till_identifier: str | None = None
+    till_label: str | None = None

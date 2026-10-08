@@ -13,6 +13,11 @@ class Settings(BaseSettings):
     jwt_algorithm: str = "HS256"
     access_token_expire_minutes: int = 30
 
+    # When True (the default, and what production must use) tellers can only
+    # log in and transact from a registered, active device. Set to False in a
+    # local .env only to keep using the browser POS during development.
+    require_registered_devices: bool = True
+
     transaction_timeout_minutes: int = 5
     withdrawal_approval_threshold: float = 5000.0
 

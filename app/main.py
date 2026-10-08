@@ -2,7 +2,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.config import get_settings
-from app.routers import auth, audit, reports, callbacks, merchants, providers, shops, tellers, tills, transactions, users
+from app.routers import auth, audit, reports, callbacks, devices, merchants, providers, shops, tellers, tills, transactions, users
 
 app = FastAPI(title="PayPulse", version="0.1.0")
 
@@ -28,6 +28,8 @@ app.include_router(reports.router)
 app.include_router(shops.router)
 app.include_router(tills.router)
 app.include_router(tellers.router)
+app.include_router(devices.router)
+app.include_router(devices.device_router)
 
 
 @app.get("/health")
