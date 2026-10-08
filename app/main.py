@@ -29,6 +29,7 @@ app.include_router(shops.router)
 app.include_router(tills.router)
 app.include_router(tellers.router)
 app.include_router(devices.router)
+app.include_router(devices.admin_router)
 app.include_router(devices.device_router)
 
 

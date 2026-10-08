@@ -54,7 +54,12 @@ M, S = uuid.uuid4(), uuid.uuid4()
 
 
 def dev(**kw):
-    return NS(merchant_id=kw.get("merchant_id", M), shop_id=kw.get("shop_id", S))
+    return NS(
+        status=kw.get("status", DeviceStatus.ACTIVE),
+        merchant_id=kw.get("merchant_id", M),
+        shop_id=kw.get("shop_id", S),
+        till_id=kw.get("till_id", uuid.uuid4()),
+    )
 
 
 def code_of(exc: HTTPException) -> str:
@@ -81,11 +86,30 @@ def test_scope_allows_owner_with_no_shop_on_a_shop_device():
     assert check_device_scope(d, merchant_id=M, shop_id=None) is d
 
 
+def test_scope_suspended_and_unassigned():
+    with pytest.raises(HTTPException) as e:
+        check_device_scope(dev(status=DeviceStatus.SUSPENDED), merchant_id=M, shop_id=S)
+    assert code_of(e.value) == "device_suspended"
+    with pytest.raises(HTTPException) as e:
+        check_device_scope(dev(till_id=None), merchant_id=M, shop_id=S)
+    assert code_of(e.value) == "device_unassigned"
+    with pytest.raises(HTTPException) as e:
+        check_device_scope(dev(merchant_id=None), merchant_id=M, shop_id=S)
+    assert code_of(e.value) == "device_unassigned"
+    with pytest.raises(HTTPException) as e:
+        check_device_scope(dev(status=DeviceStatus.REVOKED), merchant_id=M, shop_id=S)
+    assert code_of(e.value) == "device_not_registered"
+
+
 def test_routes_are_wired():
     from app.main import app
 
     paths = {(m, r.path) for r in app.routes if hasattr(r, "methods") for m in r.methods}
     assert ("POST", "/devices/enroll") in paths
     assert ("GET", "/devices/me") in paths
-    assert ("POST", "/merchants/{merchant_id}/devices") in paths
-    assert ("POST", "/merchants/{merchant_id}/devices/{device_id}/revoke") in paths
+    assert ("GET", "/admin/devices") in paths
+    assert ("POST", "/admin/devices") in paths
+    assert ("POST", "/admin/devices/{device_id}/assign") in paths
+    assert ("POST", "/admin/devices/{device_id}/suspend") in paths
+    assert ("POST", "/admin/devices/{device_id}/revoke") in paths
+    assert ("PUT", "/merchants/{merchant_id}/tills/{till_id}/device") in paths

@@ -43,6 +43,8 @@ def issue_enrollment_code(device: Device) -> str:
     device.status = DeviceStatus.PENDING
     device.revoked_at = None
     device.revoked_reason = None
+    device.suspended_at = None
+    device.suspended_reason = None
     return code
 
 
@@ -78,10 +80,12 @@ def clear_enroll_failures(client_key: str) -> None:
     _failures.pop(client_key, None)
 
 
-async def find_active_device(db: AsyncSession, token: str | None) -> Device | None:
+async def find_device_by_token(db: AsyncSession, token: str | None) -> Device | None:
+    """The device a token belongs to, in ACTIVE or SUSPENDED state. Revoked and
+    never-enrolled devices hold no token hash, so they never match."""
     if not token:
         return None
     device = await db.scalar(select(Device).where(Device.token_hash == hash_secret(token)))
-    if device is None or device.status != DeviceStatus.ACTIVE:
+    if device is None or device.status not in (DeviceStatus.ACTIVE, DeviceStatus.SUSPENDED):
         return None
     return device

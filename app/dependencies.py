@@ -10,7 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import get_settings
 from app.database import get_db
-from app.models import Device, User
+from app.models import Device, DeviceStatus, User
 from app.services import device_service
 
 settings = get_settings()
@@ -27,8 +27,10 @@ def _device_error(code: str, message: str) -> HTTPException:
 
 
 async def resolve_device(request: Request, db: AsyncSession) -> Device | None:
-    """The ACTIVE device named by the request's X-Device-Token header, or None."""
-    device = await device_service.find_active_device(db, request.headers.get(DEVICE_HEADER))
+    """The device named by the request's X-Device-Token header (active or
+    suspended), or None. Whether it may actually do anything is decided by
+    check_device_scope."""
+    device = await device_service.find_device_by_token(db, request.headers.get(DEVICE_HEADER))
     if device is None:
         return None
     now = datetime.now(timezone.utc)
@@ -44,7 +46,16 @@ def check_device_scope(device: Device | None, *, merchant_id: uuid.UUID | None, 
     if device is None:
         raise _device_error(
             "device_not_registered",
-            "This device isn't registered with PayPulse. Ask your manager for an enrolment code.",
+            "This device isn't registered with PayPulse. Contact PayPulse to have it set up.",
+        )
+    if device.status == DeviceStatus.SUSPENDED:
+        raise _device_error("device_suspended", "This device has been suspended. Contact PayPulse.")
+    if device.status != DeviceStatus.ACTIVE:
+        raise _device_error("device_not_registered", "This device isn't registered with PayPulse.")
+    if device.merchant_id is None or device.till_id is None:
+        raise _device_error(
+            "device_unassigned",
+            "This device hasn't been assigned to a till yet. Ask your manager, or contact PayPulse.",
         )
     if merchant_id is None or device.merchant_id != merchant_id:
         raise _device_error("device_wrong_merchant", "This device belongs to a different merchant.")

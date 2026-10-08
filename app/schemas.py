@@ -409,14 +409,24 @@ class TillOut(BaseModel):
     status: str
     blocked_reason: str | None
     created_at: datetime
+    # The device this till runs on (one device per till).
+    device_id: uuid.UUID | None = None
+    device_reference: str | None = None
+    device_label: str | None = None
+    device_status: str | None = None
 
     model_config = {"from_attributes": True}
 
 
 class TillCreate(BaseModel):
     shop_id: uuid.UUID
-    till_identifier: str
     label: str
+    # The till takes its identifier from this device.
+    device_id: uuid.UUID
+
+
+class TillDeviceSet(BaseModel):
+    device_id: uuid.UUID
 
 
 class TillStatusUpdate(BaseModel):
@@ -472,34 +482,45 @@ class ResetPasswordOut(BaseModel):
     temporary_password: str
 
 
-# ---- Devices (registered phones / POS terminals) ----
+# ---- Devices (PayPulse-owned phones / POS terminals) ----
 
 class DeviceCreate(BaseModel):
-    shop_id: uuid.UUID
-    till_id: uuid.UUID | None = None
+    """Adds a device to PayPulse's inventory."""
+
     label: str = Field(..., min_length=1, max_length=150)
+    serial_number: str | None = Field(None, max_length=100)
 
 
-class DeviceRevoke(BaseModel):
+class DeviceAssign(BaseModel):
+    merchant_id: uuid.UUID
+
+
+class DeviceReason(BaseModel):
     reason: str = Field(..., min_length=1, max_length=300)
 
 
 class DeviceOut(BaseModel):
     id: uuid.UUID
-    merchant_id: uuid.UUID
-    shop_id: uuid.UUID
+    reference: str
+    serial_number: str | None = None
+    label: str
+    status: str
+    merchant_id: uuid.UUID | None = None
+    merchant_name: str | None = None
+    shop_id: uuid.UUID | None = None
     shop_name: str | None = None
     till_id: uuid.UUID | None = None
     till_label: str | None = None
-    label: str
-    status: str
     platform: str | None = None
     model: str | None = None
     os_version: str | None = None
     app_version: str | None = None
     created_at: datetime
     enrolled_at: datetime | None = None
+    assigned_at: datetime | None = None
     last_seen_at: datetime | None = None
+    suspended_at: datetime | None = None
+    suspended_reason: str | None = None
     revoked_at: datetime | None = None
     revoked_reason: str | None = None
     enrollment_expires_at: datetime | None = None
@@ -508,7 +529,7 @@ class DeviceOut(BaseModel):
 
 
 class DeviceWithCodeOut(DeviceOut):
-    """Returned once, when a device is registered or its code is reissued.
+    """Returned once, when a device is added or its code is reissued.
     The code is not stored in readable form, so it can't be shown again."""
 
     enrollment_code: str
@@ -527,8 +548,12 @@ class DeviceEnrollOut(BaseModel):
     device_id: uuid.UUID
     device_token: str
     label: str
-    merchant_id: uuid.UUID
-    shop_id: uuid.UUID
+    status: str = "active"
+    # False until PayPulse has assigned it to a merchant and the owner has
+    # linked it to a till; the app shows a waiting screen until then.
+    assigned: bool = False
+    merchant_id: uuid.UUID | None = None
+    shop_id: uuid.UUID | None = None
     shop_name: str | None = None
     till_id: uuid.UUID | None = None
     till_identifier: str | None = None

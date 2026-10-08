@@ -83,9 +83,10 @@ class TillStatus(str, enum.Enum):
 
 
 class DeviceStatus(str, enum.Enum):
-    PENDING = "pending"   # registered by the owner, not yet enrolled on a phone
-    ACTIVE = "active"     # enrolled; allowed onto the network
-    REVOKED = "revoked"   # shut out; needs a fresh enrollment code to come back
+    PENDING = "pending"     # in PayPulse's inventory, not yet enrolled on a handset
+    ACTIVE = "active"       # enrolled; allowed onto the network (once assigned to a merchant and till)
+    SUSPENDED = "suspended" # switched off for now (e.g. unpaid lease); credential kept, reinstating is instant
+    REVOKED = "revoked"     # credential destroyed; needs a fresh enrollment code to come back
 
 
 class Merchant(Base):
@@ -151,24 +152,28 @@ class Till(Base):
 
 
 class Device(Base):
-    """A physical phone or POS terminal that is allowed onto the network.
+    """A physical phone or POS terminal that PayPulse owns or leases out.
 
-    The owner registers it in the portal (which creates this row as PENDING
-    and shows a one-time enrollment code). The app enrols with that code and
-    is handed a long random device token, stored on the device. Only the
-    SHA-256 of the code and of the token are kept here, so a database leak
-    doesn't hand anyone a working credential. Teller sessions and every
-    transaction call must carry the token of an ACTIVE device (see
-    dependencies.require_device); revoking the row cuts the device off on
-    its very next request."""
+    Lifecycle: PayPulse adds it to inventory (PENDING, with a one-time
+    enrollment code) -> enrols it at the office (ACTIVE, handed a long random
+    device token) -> assigns it to a merchant (merchant_id) -> the merchant
+    owner links it to one of their tills (till_id, which also fixes the shop).
+    Only when all of that is true does it work. Suspending it (unpaid lease)
+    stops it at once and keeps the credential; revoking destroys the
+    credential. Only SHA-256 hashes of the code and token are stored, so a
+    database leak doesn't hand anyone a working credential."""
 
     __tablename__ = "devices"
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=_uuid)
-    merchant_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("merchants.id"), index=True)
-    shop_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("shops.id"))
-    till_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("tills.id"), nullable=True)
+    # Empty while the device is in PayPulse's stock.
+    merchant_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("merchants.id"), nullable=True, index=True)
+    # Follows the till it is linked to.
+    shop_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("shops.id"), nullable=True)
+    # One device per till and one till per device.
+    till_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("tills.id"), nullable=True, unique=True)
     label: Mapped[str] = mapped_column(String(150))
+    serial_number: Mapped[str | None] = mapped_column(String(100), nullable=True, unique=True)
     status: Mapped[DeviceStatus] = mapped_column(Enum(DeviceStatus, name="device_status"), default=DeviceStatus.PENDING)
 
     enrollment_code_hash: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
@@ -187,8 +192,17 @@ class Device(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     enrolled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     last_seen_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    assigned_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    suspended_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    suspended_reason: Mapped[str | None] = mapped_column(String(300), nullable=True)
     revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     revoked_reason: Mapped[str | None] = mapped_column(String(300), nullable=True)
+
+    @property
+    def reference(self) -> str:
+        """The short name people use for it: the serial number if recorded,
+        otherwise a stable code derived from its id."""
+        return self.serial_number or "PP-" + self.id.hex[:8].upper()
 
 
 class MerchantKycDocument(Base):
