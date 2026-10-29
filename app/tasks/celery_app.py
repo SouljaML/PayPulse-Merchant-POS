@@ -22,3 +22,7 @@ celery_app.conf.beat_schedule = {
     },
 }
 celery_app.conf.timezone = "Africa/Maseru"
+
+# Without this a worker started with `-A app.tasks.celery_app` never imports the
+# task modules, so every scheduled task is rejected as "unregistered".
+celery_app.conf.imports = ("app.tasks.expiry", "app.tasks.reconciliation")
