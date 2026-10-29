@@ -317,6 +317,7 @@ async def list_merchant_devices(
 async def _enroll_out(db: AsyncSession, device: Device, token: str) -> DeviceEnrollOut:
     shop = await db.get(Shop, device.shop_id) if device.shop_id else None
     till = await db.get(Till, device.till_id) if device.till_id else None
+    merchant = await db.get(Merchant, device.merchant_id) if device.merchant_id else None
     return DeviceEnrollOut(
         device_id=device.id,
         device_token=token,
@@ -326,6 +327,8 @@ async def _enroll_out(db: AsyncSession, device: Device, token: str) -> DeviceEnr
         merchant_id=device.merchant_id,
         shop_id=device.shop_id,
         shop_name=shop.name if shop else None,
+        shop_address=shop.location if shop else None,
+        merchant_name=(merchant.trading_name or merchant.legal_name) if merchant else None,
         till_id=device.till_id,
         till_identifier=till.till_identifier if till else None,
         till_label=till.label if till else None,

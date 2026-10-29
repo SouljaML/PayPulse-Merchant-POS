@@ -555,6 +555,8 @@ class DeviceEnrollOut(BaseModel):
     merchant_id: uuid.UUID | None = None
     shop_id: uuid.UUID | None = None
     shop_name: str | None = None
+    shop_address: str | None = None
+    merchant_name: str | None = None
     till_id: uuid.UUID | None = None
     till_identifier: str | None = None
     till_label: str | None = None
